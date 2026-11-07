@@ -1,0 +1,32 @@
+name: Upstream sync
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 */6 * * *'
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch upstream history
+        run: |
+          git remote add upstream https://github.com/NousResearch/hermes-agent.git
+          git fetch --no-tags upstream main
+          git show-ref --verify refs/remotes/upstream/main
+      - name: Open sync pull request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: upstream-sync
+          delete-branch: false
+          base: main
+          title: 'chore: sync upstream Hermes Agent'
+          commit-message: 'chore: sync upstream Hermes Agent'
+          body: |
+            Automated comparison against NousResearch/hermes-agent.
+            Review conflicts and preserve owner-specific integration changes before merging.

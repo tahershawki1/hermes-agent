@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "engine_repository": "https://github.com/tahershawki1/hermes-agent",
+  "upstream_repository": "https://github.com/NousResearch/hermes-agent",
+  "runtime_source_policy": "owner_repository_only",
+  "minimum_android_api": 26,
+  "application_repository": "https://github.com/tahershawki1/hermes-mobile-app",
+  "rollback_policy": "retain_previous_install_until_health_check_passes"
+}

@@ -1,0 +1,23 @@
+name: Engine tests
+on:
+  push:
+    branches: [main, development/**, upstream-sync]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install engine and focused test dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e . pytest psutil
+      - name: Run owner integration tests
+        run: python -m pytest -q tests/agent/test_title_generator.py tests/test_hermes_yaml.py tests/tui_gateway/test_model_switch_marker_role.py

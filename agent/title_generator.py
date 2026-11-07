@@ -34,6 +34,94 @@ def wait_for_title_upgrades(timeout: float = 10.0) -> None:
     for thread in list(_UPGRADE_THREADS):
         thread.join(max(0.0, deadline - time.monotonic()))
 
+
+# Provider capacity trouble (429 rate limit, overload, timeout, unreachable, 5xx) is nothing the user
+# can act on, and the instant title already names the session: such a failure stays in the log instead
+# of reaching ``failure_callback``, and opens one process-wide backoff (every session's title call goes
+# to the same provider) during which no title request is sent. The session keeps its derived title and
+# is upgraded on a later turn once the backoff ends, for up to ``TITLE_CAPACITY_RETRIES`` failed requests.
+TITLE_BACKOFF_BASE_SECONDS = 60.0
+TITLE_BACKOFF_MAX_SECONDS = 1800.0
+TITLE_CAPACITY_RETRIES = 6
+_RETRY_SESSIONS_MAX = 256
+_backoff_lock = threading.Lock()
+_backoff = {"until": 0.0, "delay": 0.0}
+# session_id -> title requests that failed for capacity; insertion order evicts the oldest past the cap.
+_retry_sessions: "dict[str, int]" = {}
+# Set by generate_title on this thread when it skipped or failed for capacity (read by auto_title_session).
+_attempt = threading.local()
+
+
+def _is_capacity_failure(exc: BaseException) -> bool:
+    """Rate limit / overload / transport trouble that passes on its own. Billing and quota errors are not:
+    the user has to act on those, so they keep reaching ``failure_callback``."""
+    from agent import auxiliary_client as aux
+    try:
+        if aux._is_payment_error(exc):
+            return False
+        return bool(
+            aux._is_rate_limit_error(exc) or aux._is_overloaded_error(exc) or aux._is_timeout_error(exc)
+            or aux._is_transient_transport_error(exc) or "cooling down" in str(exc).lower()
+        )
+    except Exception:
+        return False
+
+
+def title_backoff_remaining() -> float:
+    """Seconds until title requests are sent again (0.0 when not backing off)."""
+    with _backoff_lock:
+        return max(0.0, _backoff["until"] - time.monotonic())
+
+
+def _open_title_backoff(exc: BaseException) -> float:
+    """Double the backoff (from ``TITLE_BACKOFF_BASE_SECONDS``, honouring a longer ``Retry-After``, capped
+    at ``TITLE_BACKOFF_MAX_SECONDS``); returns the delay."""
+    retry_after = None
+    with suppress(Exception):
+        from agent.retry_utils import parse_retry_after_seconds
+        retry_after = parse_retry_after_seconds(getattr(getattr(exc, "response", None), "headers", None))
+    with _backoff_lock:
+        now = time.monotonic()
+        if _backoff["until"] > now:  # another thread's request already opened this backoff: don't double it again
+            return _backoff["until"] - now
+        delay = max(TITLE_BACKOFF_BASE_SECONDS, _backoff["delay"] * 2, retry_after or 0.0)
+        delay = min(delay, TITLE_BACKOFF_MAX_SECONDS)
+        _backoff["delay"] = delay
+        _backoff["until"] = now + delay
+        return delay
+
+
+def _clear_title_backoff() -> None:
+    with _backoff_lock:
+        _backoff["delay"] = 0.0
+        _backoff["until"] = 0.0
+
+
+def _note_title_deferred(session_id: str, failed_request: bool) -> None:
+    """Keep *session_id* eligible for a later upgrade; only requests that were sent count against its budget."""
+    with _backoff_lock:
+        count = _retry_sessions.pop(session_id, 0) + (1 if failed_request else 0)
+        _retry_sessions[session_id] = count
+        while len(_retry_sessions) > _RETRY_SESSIONS_MAX:
+            _retry_sessions.pop(next(iter(_retry_sessions)))
+
+
+def _title_retry_pending(session_id: str) -> bool:
+    with _backoff_lock:
+        return _retry_sessions.get(session_id, TITLE_CAPACITY_RETRIES) < TITLE_CAPACITY_RETRIES
+
+
+def _forget_title_retry(session_id: str) -> None:
+    with _backoff_lock:
+        _retry_sessions.pop(session_id, None)
+
+
+def reset_title_backoff() -> None:
+    """Clear the backoff and the retry list (tests)."""
+    _clear_title_backoff()
+    with _backoff_lock:
+        _retry_sessions.clear()
+
 # (task_name, exception) -> None; surfaces auxiliary failures so silent drops don't pile up as NULL titles.
 FailureCallback = Callable[[str, BaseException], None]
 # (title, source) -> None; source is the persisted provenance (``derived`` / ``llm``). Consumers paying a
@@ -492,6 +580,11 @@ def generate_title(
             return None
     except Exception:  # fail open: a broken validator must not disable titling
         logger.debug("Title runtime validator raised; proceeding", exc_info=True)
+    remaining = title_backoff_remaining()
+    if remaining > 0:
+        logger.debug("Title generation skipped: provider backoff, %.0fs left", remaining)
+        _attempt.deferred = "skipped"
+        return None
     user_snippet = build_title_input(user_message, title_preview)
     if not user_snippet.strip() or (
         # An attachment-only opener (manual attach, no paste preview) reaches
@@ -529,6 +622,7 @@ def generate_title(
             # ("```json") as the session title (#91927).
             reasoning_config={"enabled": False},
         )
+        _clear_title_backoff()
         message = response.choices[0].message
         title = _clean_title(_extract_title_text(message.content or "") or _title_from_reasoning(message))
         # Answer-shaped output guard: titling is a 3-7 word task, so a title with many words is a model that
@@ -553,6 +647,12 @@ def generate_title(
             return None
         return title
     except Exception as e:
+        if _is_capacity_failure(e):
+            delay = _open_title_backoff(e)
+            logger.info("Title generation deferred %.0fs (provider busy, the session keeps its instant title): %s",
+                        delay, e)
+            _attempt.deferred = "failed"
+            return None
         # WARNING so it shows in agent.log without debug mode; stack at debug.
         logger.warning("Title generation failed: %s", e)
         logger.debug("Title generation traceback", exc_info=True)
@@ -667,10 +767,15 @@ def auto_title_session(
         # Same for the accounting context, so the title call's token usage is recorded against this session
         # (task='title_generation', #23270).
         set_accounting_context(session_db, session_id)
+        _attempt.deferred = None
         title, source = generate_title(
             user_message, failure_callback=failure_callback, main_runtime=main_runtime,
             runtime_validator=runtime_validator, title_preview=title_preview,
         ), "llm"
+        if _attempt.deferred:
+            _note_title_deferred(session_id, failed_request=_attempt.deferred == "failed")
+        else:
+            _forget_title_retry(session_id)
         if title and _is_provisional_greeting_title(title):
             source = "derived"
         if not title:  # the inline attempt declined collisions; off the critical path the lineage scan is affordable
@@ -755,10 +860,12 @@ def maybe_auto_title(
     # name is still a placeholder (instant slice, or the model's greeting title for a bare "hi") that
     # the first substantive turn should replace. Untitled sessions always get another shot; a
     # placeholder gets turns 2-3, so a failing title model costs at most three calls, not one per turn.
+    # A placeholder whose upgrade met a busy provider keeps its turns until the backoff lets one through.
     user_msg_count = sum(1 for m in (conversation_history or []) if _is_real_user_turn(m))
     if user_msg_count > 1 and (
         _has_upgraded_title(session_db, session_id)
-        or (user_msg_count > 3 and not _session_is_untitled(session_db, session_id))
+        or (user_msg_count > 3 and not _session_is_untitled(session_db, session_id)
+            and not _title_retry_pending(session_id))
     ):
         return None
     kanban_title = _kanban_task_title()
@@ -779,6 +886,10 @@ def maybe_auto_title(
     apply_instant_title(session_db, session_id, user_message, title_callback, title_preview=title_preview)
     if not _model_title_upgrade_enabled():
         logger.debug("Instant title persisted; model upgrade disabled by auxiliary.title_generation.model_upgrade_enabled=false")
+        return None
+    if title_backoff_remaining() > 0:  # no thread for a request generate_title would skip anyway
+        logger.debug("Instant title persisted; model upgrade waits for the provider backoff")
+        _note_title_deferred(session_id, failed_request=False)
         return None
     # The thread must resolve auxiliary.title_generation (config, provider key, language) for the
     # profile whose turn this is: a bare Thread starts with an empty context and lands on the launch

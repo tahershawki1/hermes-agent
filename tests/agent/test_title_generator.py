@@ -898,3 +898,133 @@ class TestModelSwitchMarkerNotTitleable:
         assert apply_instant_title(db, "sess-1", "南京市秦淮区 小时级天气预报") == (
             "南京市秦淮区 小时级天气预报"
         )
+
+
+class _RateLimited(Exception):
+    """A provider 429, shaped like the SDK error (``status_code`` + ``response.headers``)."""
+
+    def __init__(self, retry_after=None):
+        super().__init__("HTTP 429: This request would exceed your organization's rate limit")
+        self.status_code = 429
+        self.response = MagicMock(headers={"retry-after": str(retry_after)} if retry_after else {})
+
+
+def _title_response(text):
+    resp = MagicMock()
+    resp.choices[0].message.content = text
+    resp.choices[0].message.reasoning = None
+    return resp
+
+
+class TestTitleCapacityBackoff:
+    """A busy provider (429, overload, timeout) keeps the instant title quietly and backs off."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_backoff(self):
+        from agent.title_generator import reset_title_backoff
+        reset_title_backoff()
+        with patch("agent.title_generator._auto_title_enabled", return_value=True), \
+                patch("agent.title_generator._model_title_upgrade_enabled", return_value=True):
+            yield
+        reset_title_backoff()
+
+    def test_rate_limit_is_quiet_and_skips_requests_until_the_backoff_ends(self):
+        from agent.title_generator import TITLE_BACKOFF_BASE_SECONDS, title_backoff_remaining
+        reported = []
+        with patch("agent.title_generator.call_llm", side_effect=_RateLimited()) as llm:
+            assert generate_title("fix the scheduler", failure_callback=lambda *a: reported.append(a)) is None
+            assert generate_title("another chat", failure_callback=lambda *a: reported.append(a)) is None
+        assert reported == []  # never a user-visible warning
+        assert llm.call_count == 1  # the second chat sent nothing to the rate-limited provider
+        assert 0 < title_backoff_remaining() <= TITLE_BACKOFF_BASE_SECONDS
+
+    @pytest.mark.parametrize("exc", [
+        RuntimeError("Connection error: connection reset by peer"),
+        type("APITimeoutError", (Exception,), {})("Request timed out."),
+        type("APIStatusError", (Exception,), {"status_code": 503})("HTTP 503: upstream unavailable"),
+    ])
+    def test_transport_and_server_trouble_backs_off_quietly_too(self, exc):
+        from agent.title_generator import title_backoff_remaining
+        reported = []
+        with patch("agent.title_generator.call_llm", side_effect=exc):
+            assert generate_title("fix the scheduler", failure_callback=lambda *a: reported.append(a)) is None
+        assert reported == [] and title_backoff_remaining() > 0
+
+    def test_a_billing_error_still_reaches_the_failure_callback(self):
+        from agent.title_generator import title_backoff_remaining
+        reported = []
+        exc = type("APIStatusError", (Exception,), {"status_code": 402})("HTTP 402: insufficient credits")
+        with patch("agent.title_generator.call_llm", side_effect=exc):
+            generate_title("fix the scheduler", failure_callback=lambda *a: reported.append(a))
+        assert reported == [("title generation", exc)] and title_backoff_remaining() == 0
+
+    def test_backoff_doubles_honours_retry_after_and_is_capped(self):
+        import agent.title_generator as tg
+        delays = []
+        for exc in (_RateLimited(), _RateLimited(), _RateLimited(retry_after=900), _RateLimited(), _RateLimited()):
+            with tg._backoff_lock:
+                tg._backoff["until"] = 0.0  # let the next request through, keeping the delay
+            with patch("agent.title_generator.call_llm", side_effect=exc):
+                generate_title("fix the scheduler")
+            delays.append(tg._backoff["delay"])
+        assert delays == [60.0, 120.0, 900.0, 1800.0, 1800.0]
+
+    def test_requests_already_in_flight_do_not_double_an_open_backoff(self):
+        import agent.title_generator as tg
+        assert tg._open_title_backoff(_RateLimited()) == 60.0
+        assert tg._open_title_backoff(_RateLimited()) <= 60.0  # a second thread failing at the same moment
+        assert tg._backoff["delay"] == 60.0
+
+    def test_a_successful_title_clears_the_backoff(self):
+        import agent.title_generator as tg
+        with patch("agent.title_generator.call_llm", side_effect=_RateLimited()):
+            generate_title("fix the scheduler")
+        with tg._backoff_lock:
+            tg._backoff["until"] = 0.0
+        with patch("agent.title_generator.call_llm", return_value=_title_response('{"title": "Scheduler fix"}')):
+            assert generate_title("fix the scheduler") == "Scheduler fix"
+        assert tg._backoff == {"until": 0.0, "delay": 0.0}
+
+    def test_a_rate_limited_session_keeps_its_instant_title_and_is_named_after_the_backoff(self, tmp_path):
+        import agent.title_generator as tg
+        db = SessionDB(tmp_path / "state.db")
+        db.create_session(session_id="sess-1", source="cli")
+        history = [{"role": "user", "content": "fix the flaky scheduler test"}]
+        reported = []
+        with patch("agent.title_generator.call_llm", side_effect=_RateLimited()) as llm:
+            maybe_auto_title(db, "sess-1", history[0]["content"], history,
+                             failure_callback=lambda *a: reported.append(a))
+            wait_for_title_upgrades(10)
+            assert llm.call_count == 1
+            # Turns 2-5 inside the backoff: no request, no thread, the derived title stays.
+            for n in range(2, 6):
+                history.append({"role": "user", "content": f"turn {n} question"})
+                assert maybe_auto_title(db, "sess-1", f"turn {n} question", history) is None
+            assert llm.call_count == 1
+        assert reported == []
+        assert db.get_session_title("sess-1") == "fix the flaky scheduler test"
+        assert db.get_session_title_source("sess-1") == "derived"
+        with tg._backoff_lock:
+            tg._backoff["until"] = 0.0  # the backoff has run out
+        history.append({"role": "user", "content": "turn 6 question"})
+        with patch("agent.title_generator.call_llm", return_value=_title_response('{"title": "Flaky scheduler test"}')):
+            maybe_auto_title(db, "sess-1", "turn 6 question", history)  # past turn 3: still owed its upgrade
+            wait_for_title_upgrades(10)
+        assert db.get_session_title("sess-1") == "Flaky scheduler test"
+        assert db.get_session_title_source("sess-1") == "llm"
+        assert not tg._title_retry_pending("sess-1")
+
+    def test_a_session_stops_asking_after_its_capacity_retries(self, tmp_path):
+        import agent.title_generator as tg
+        db = SessionDB(tmp_path / "state.db")
+        db.create_session(session_id="sess-1", source="cli")
+        history = []
+        with patch("agent.title_generator.call_llm", side_effect=_RateLimited()) as llm:
+            for n in range(tg.TITLE_CAPACITY_RETRIES + 4):
+                history.append({"role": "user", "content": f"question number {n}"})
+                with tg._backoff_lock:
+                    tg._backoff["until"] = 0.0
+                maybe_auto_title(db, "sess-1", f"question number {n}", history)
+                wait_for_title_upgrades(10)
+        assert llm.call_count == tg.TITLE_CAPACITY_RETRIES
+        assert db.get_session_title_source("sess-1") == "derived"
