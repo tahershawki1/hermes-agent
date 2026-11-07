@@ -19,6 +19,8 @@ from tools.environments.fd_wait import open_fd_waiter
 from tools.tool_output_truncate import head_tail_split, truncation_notice
 from hermes_cli._subprocess_compat import windows_hide_flags
 
+from agent.memory_provider import spawn_context_thread
+
 # Sentinel capacity for full-fidelity capture: large enough that the collector
 # never evicts, so bounded and unbounded modes share one code path.
 _UNBOUNDED_CAPTURE_CHARS = 2**63 - 1
@@ -490,6 +492,6 @@ def _start_drain_thread(
         proc: ProcessHandle, output: _BoundedOutputCollector, stop: threading.Event | None = None,
 ) -> threading.Thread:
     """Start the daemon thread running :func:`_drain_stdout`; *stop* ends it early."""
-    thread = threading.Thread(target=_drain_stdout, args=(proc, output, stop), daemon=True)
+    thread = spawn_context_thread(_drain_stdout, args=(proc, output, stop), name="terminal-output-drain")
     thread.start()
     return thread
