@@ -1,0 +1,25 @@
+name: Engine release
+on:
+  push:
+    tags: ['engine-v*']
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --upgrade pip pytest
+      - run: python -m pytest -q
+      - name: Publish source release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            Hermes Agent source release from tahershawki1/hermes-agent.
+            Runtime installs must use this repository; upstream is sync-only.
