@@ -6139,6 +6139,11 @@ export interface TerminalOutputPayload {
   process_id: string
   chunk: string
 }
+/** ``tools.environments.base_output`` live foreground terminal drain. */
+export interface TerminalToolOutputPayload {
+  tool_id: string
+  chunk: string
+}
 export interface TerminalClosePayload {
   process_id: string
 }
@@ -7326,6 +7331,8 @@ export interface BackendGatewayEventMap {
   'subagent.tool': SubagentEventPayload
   /** An agent-owned background process closed. */
   'terminal.close': TerminalClosePayload
+  /** Live output chunk from a foreground terminal tool call. */
+  'terminal.output': TerminalToolOutputPayload
   /** Legacy thinking-text chunk (thinking_callback). */
   'thinking.delta': StreamDeltaPayload
   /** Point at a desktop element with a one-line tip bubble. */
@@ -7420,6 +7427,7 @@ export const GATEWAY_EVENT_TYPES = [
   'subagent.thinking',
   'subagent.tool',
   'terminal.close',
+  'terminal.output',
   'thinking.delta',
   'tip.show',
   'todo.updated',

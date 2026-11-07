@@ -83,6 +83,45 @@ FOREGROUND_MAX_TIMEOUT = _safe_parse_import_env("TERMINAL_MAX_FOREGROUND_TIMEOUT
 # thread, can't stomp on each other (GHSA-qg5c-hvr5-hjgr). Gateway mode
 # resolves approvals via the per-session queue in tools.approval instead.
 _callback_tls = threading.local()
+_live_output_lock = threading.Lock()
+_live_output_calls: dict[tuple[str, str], list[tuple[str, Any]]] = {}
+
+
+def register_live_output_call(session_id: str, tool_call_id: str, command: str, callback) -> None:
+    """Bind a terminal tool call to its live output sink for this session."""
+    with _live_output_lock:
+        _live_output_calls.setdefault((session_id, command), []).append((tool_call_id, callback))
+
+
+def unregister_live_output_call(session_id: str, tool_call_id: str, command: str) -> None:
+    with _live_output_lock:
+        key = (session_id, command)
+        remaining = [entry for entry in _live_output_calls.get(key, []) if entry[0] != tool_call_id]
+        if remaining:
+            _live_output_calls[key] = remaining
+        else:
+            _live_output_calls.pop(key, None)
+
+
+def flush_live_output_call(session_id: str, tool_call_id: str, command: str) -> None:
+    """Flush a stateful live-output callback before removing its registration."""
+    with _live_output_lock:
+        callbacks = [callback for call_id, callback in _live_output_calls.get((session_id, command), [])
+                     if call_id == tool_call_id]
+    for callback in callbacks:
+        flush = getattr(callback, "flush", None)
+        if flush is not None:
+            try:
+                flush()
+            except Exception:
+                pass
+
+
+def _live_output_callback(session_id: str, command: str):
+    with _live_output_lock:
+        calls = _live_output_calls.get((session_id, command), [])
+        # Identical commands may be run concurrently; suppress streaming rather than mix their output.
+        return calls[0][1] if len(calls) == 1 else None
 
 
 def _get_sudo_password_callback():
@@ -1372,6 +1411,8 @@ def _run_foreground(
             # internal env.execute() consumers stay unbounded.
             result = env.execute(
                 command, timeout=effective_timeout, cwd=command_cwd, bounded_capture=True,
+                **({"output_callback": _live_output_callback(session_key, command)}
+                   if getattr(env, "is_local", False) and _live_output_callback(session_key, command) else {}),
                 **_yield_kwargs(command, env_type=env_type, cwd=command_cwd, effective_task_id=eff,
                                 task_id=task_id, session_key=session_key),
             )

@@ -44942,6 +44942,26 @@
         "title": "TerminalResizeResult",
         "type": "object"
       },
+      "TerminalToolOutputPayload": {
+        "additionalProperties": false,
+        "description": "``tools.environments.base_output`` live foreground terminal drain.",
+        "properties": {
+          "tool_id": {
+            "title": "Tool Id",
+            "type": "string"
+          },
+          "chunk": {
+            "title": "Chunk",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool_id",
+          "chunk"
+        ],
+        "title": "TerminalToolOutputPayload",
+        "type": "object"
+      },
       "ThemeApplyRequestParams": {
         "additionalProperties": false,
         "description": "``tools/set_theme_tool.py`` values; accent is a swatch id, ``theme`` or ``#rrggbb``.",
@@ -51010,6 +51030,18 @@
           "name": "payload",
           "schema": {
             "$ref": "#/components/schemas/TerminalClosePayload"
+          }
+        }
+      ]
+    },
+    {
+      "name": "terminal.output",
+      "summary": "Live output chunk from a foreground terminal tool call.",
+      "params": [
+        {
+          "name": "payload",
+          "schema": {
+            "$ref": "#/components/schemas/TerminalToolOutputPayload"
           }
         }
       ]
