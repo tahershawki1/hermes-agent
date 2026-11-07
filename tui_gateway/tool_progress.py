@@ -22,6 +22,29 @@ _TUI_VERBOSE_TEXT_MAX_CHARS = 1_000
 _TUI_VERBOSE_TEXT_MAX_LINES = 16
 
 
+class _StreamingRedactor:
+    """Redact streamed output without losing matches split between read chunks."""
+
+    _CONTEXT_CHARS = 4096
+
+    def __init__(self, redact):
+        self._redact = redact
+        self._pending = ""
+
+    def feed(self, chunk: str) -> str:
+        self._pending += str(chunk)
+        redacted = self._redact(self._pending)
+        if len(redacted) <= self._CONTEXT_CHARS:
+            return ""
+        committed, self._pending = redacted[:-self._CONTEXT_CHARS], redacted[-self._CONTEXT_CHARS:]
+        return committed
+
+    def flush(self) -> str:
+        redacted = self._redact(self._pending)
+        self._pending = ""
+        return redacted
+
+
 def _cap_tui_verbose_text(text: str) -> str:
     if len(text) <= _TUI_VERBOSE_TEXT_MAX_CHARS and text.count("\n") < _TUI_VERBOSE_TEXT_MAX_LINES:
         return text
@@ -288,16 +311,27 @@ def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
         stream_session_id = str((session or {}).get("session_key") or sid)
         command = args["command"]
 
+        from agent.redact import redact_sensitive_text
+        redactor = _StreamingRedactor(lambda text: redact_sensitive_text(text, force=True))
+
         def _emit_terminal_chunk(chunk: str) -> None:
             try:
-                from agent.redact import redact_sensitive_text
-                safe = redact_sensitive_text(str(chunk), force=True)
+                safe = redactor.feed(chunk)
             except Exception:
                 return
             if safe:
                 _emit("terminal.output", sid, {"tool_id": tool_call_id, "chunk": safe})
 
-        register_live_output_call(stream_session_id, tool_call_id, command, _emit_terminal_chunk)
+        def _flush_terminal_output() -> None:
+            try:
+                safe = redactor.flush()
+            except Exception:
+                return
+            if safe:
+                _emit("terminal.output", sid, {"tool_id": tool_call_id, "chunk": safe})
+
+        register_live_output_call(stream_session_id, tool_call_id, command,
+                                  _emit_terminal_chunk, _flush_terminal_output)
     if session is not None:
         with contextlib.suppress(Exception):
             from agent.display import capture_local_edit_snapshot

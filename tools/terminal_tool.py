@@ -84,23 +84,37 @@ FOREGROUND_MAX_TIMEOUT = _safe_parse_import_env("TERMINAL_MAX_FOREGROUND_TIMEOUT
 # resolves approvals via the per-session queue in tools.approval instead.
 _callback_tls = threading.local()
 _live_output_lock = threading.Lock()
-_live_output_calls: dict[tuple[str, str], list[tuple[str, Any]]] = {}
+_live_output_calls: dict[tuple[str, str], list[tuple[str, Any, Any]]] = {}
 
 
-def register_live_output_call(session_id: str, tool_call_id: str, command: str, callback) -> None:
+def register_live_output_call(session_id: str, tool_call_id: str, command: str, callback,
+                             flush_callback=None) -> None:
     """Bind a terminal tool call to its live output sink for this session."""
     with _live_output_lock:
-        _live_output_calls.setdefault((session_id, command), []).append((tool_call_id, callback))
+        _live_output_calls.setdefault((session_id, command), []).append(
+            (tool_call_id, callback, flush_callback))
 
 
 def unregister_live_output_call(session_id: str, tool_call_id: str, command: str) -> None:
+    flush_callback = None
     with _live_output_lock:
         key = (session_id, command)
-        remaining = [entry for entry in _live_output_calls.get(key, []) if entry[0] != tool_call_id]
+        entries = _live_output_calls.get(key, [])
+        remaining = []
+        for entry in entries:
+            if entry[0] == tool_call_id:
+                flush_callback = entry[2]
+            else:
+                remaining.append(entry)
         if remaining:
             _live_output_calls[key] = remaining
         else:
             _live_output_calls.pop(key, None)
+    if flush_callback is not None:
+        try:
+            flush_callback()
+        except Exception:
+            pass
 
 
 def _live_output_callback(session_id: str, command: str):
