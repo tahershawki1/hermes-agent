@@ -18,6 +18,6 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install engine and focused test dependencies
-        run: python -m pip install --upgrade pip && python -m pip install -e . pytest psutil
+        run: python -m pip install --upgrade pip && python -m pip install -e . --no-deps && python -m pip install pytest psutil python-dotenv ruamel.yaml ruamel.yaml.clib openai httpx rich tenacity fire tomli-w
       - name: Run owner integration tests
         run: python -m pytest -q tests/agent/test_title_generator.py tests/test_hermes_yaml.py tests/tui_gateway/test_model_switch_marker_role.py
