@@ -508,7 +508,8 @@ class BaseEnvironment(ABC):
     def _wait_for_process(
         self, proc: ProcessHandle, timeout: int = 120, *,
         bounded_capture: bool = False, watch_interrupt_tid: int | None = None,
-        output=None, yield_handler: Callable[[ProcessHandle, str], dict] | None = None) -> dict:
+        output=None, output_callback: Callable[[str], None] | None = None,
+        yield_handler: Callable[[ProcessHandle, str], dict] | None = None) -> dict:
         """Poll-based wait with interrupt checking and stdout draining (shared, not overridden).
         ``yield_handler(proc, output_so_far)``: when the tool thread is asked to yield
         (``tools.interrupt.request_yield`` — a user message arrived mid-command), the drain
@@ -529,7 +530,7 @@ class BaseEnvironment(ABC):
         data. See #64435.
         """
         if output is None:
-            output = _new_output_collector(proc, bounded_capture)
+            output = _new_output_collector(proc, bounded_capture, on_chunk=output_callback)
         drain_stop = threading.Event() if yield_handler is not None else None
         drain_thread = _start_drain_thread(proc, output, drain_stop)
         _now = time.monotonic()
@@ -675,6 +676,7 @@ class BaseEnvironment(ABC):
         stdin_data: str | None = None,
         rewrite_compound_background: bool = True,
         bounded_capture: bool = False,
+        output_callback: Callable[[str], None] | None = None,
         yield_handler: Callable[[ProcessHandle, str], dict] | None = None) -> dict:
         """Execute a command, return {"output": str, "returncode": int}. ``bounded_capture=True``
         caps retention at ``tool_output.max_bytes`` WHILE draining; only the foreground terminal
@@ -730,12 +732,12 @@ class BaseEnvironment(ABC):
             proc_holder.append(spawned)
             if fenced:  # the hard-exit kill may have stopped waiting for us before we registered
                 self._force_kill_process(spawned)
-            output = _new_output_collector(spawned, bounded_capture)
+            output = _new_output_collector(spawned, bounded_capture, on_chunk=output_callback)
             output_holder.append(output)
             try:
                 return self._wait_for_process(
                     spawned, timeout=effective_timeout, bounded_capture=bounded_capture,
-                    watch_interrupt_tid=parent_tid, output=output,
+                    watch_interrupt_tid=parent_tid, output=output, output_callback=output_callback,
                     **({"yield_handler": yield_handler} if yield_handler is not None else {}))
             finally:
                 with _live_foreground_cond:

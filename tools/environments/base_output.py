@@ -34,7 +34,8 @@ class _BoundedOutputCollector:
     # Hard ceiling on spill file size; protects disk from runaway output.
     _SPILL_CAP_CHARS = 5_000_000
 
-    def __init__(self, max_chars: int, spill_path: Path | None = None):
+    def __init__(self, max_chars: int, spill_path: Path | None = None,
+                 on_chunk: Callable[[str], None] | None = None):
         self.max_chars = max(1, int(max_chars))
         self._head_limit = int(self.max_chars * 0.4)
         self._tail_limit = self.max_chars - self._head_limit
@@ -48,6 +49,7 @@ class _BoundedOutputCollector:
         self._spill_fh: IO[str] | None = None
         self._spill_chars = 0
         self._spill_capped = False
+        self._on_chunk = on_chunk
 
     def _maybe_spill(self, text: str) -> None:
         """Tee ``text`` to the spill file (opened lazily on first overflow)."""
@@ -101,6 +103,12 @@ class _BoundedOutputCollector:
     def append(self, text: str) -> None:
         if not text:
             return
+        # Live observers must never interrupt pipe draining or command execution.
+        if self._on_chunk is not None:
+            try:
+                self._on_chunk(text)
+            except Exception:
+                pass
         with self._lock:
             text_len = len(text)
             # Spill tee activates at the first overflow, then mirrors every chunk.
@@ -166,14 +174,15 @@ class _BoundedOutputCollector:
             return head[:head_chars] + notice[:available] + rendered_tail + suffix
 
 
-def _new_output_collector(proc, bounded_capture: bool) -> _BoundedOutputCollector:
+def _new_output_collector(proc, bounded_capture: bool,
+                          on_chunk: Callable[[str], None] | None = None) -> _BoundedOutputCollector:
     """Build the collector for one ``_wait_for_process`` call. ``bounded_capture`` (foreground
     terminal path only) caps retention at ``tool_output.max_bytes`` and tees overflow to a
     spill file under ``$HERMES_HOME/cache/terminal-output`` (created only on actual overflow;
     spills older than 7 days are pruned opportunistically). Otherwise the collector is
     effectively unbounded so internal consumers keep full-fidelity output."""
     if not bounded_capture:
-        return _BoundedOutputCollector(_UNBOUNDED_CAPTURE_CHARS)
+        return _BoundedOutputCollector(_UNBOUNDED_CAPTURE_CHARS, on_chunk=on_chunk)
     try:
         from tools.tool_output_limits import get_max_bytes
         capture_limit = get_max_bytes()
@@ -193,7 +202,7 @@ def _new_output_collector(proc, bounded_capture: bool) -> _BoundedOutputCollecto
                     pass
     except Exception:
         spill_path = None
-    return _BoundedOutputCollector(capture_limit, spill_path=spill_path)
+    return _BoundedOutputCollector(capture_limit, spill_path=spill_path, on_chunk=on_chunk)
 
 
 def _finalize_wait_result(collector: _BoundedOutputCollector, rendered: str, returncode: int | None) -> dict:

@@ -283,6 +283,21 @@ def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
     if _connector_lifecycle_is_stale(sid, name, args):
         return
     session = _sessions.get(sid)
+    if name == "terminal" and isinstance(args, dict) and isinstance(args.get("command"), str):
+        from tools.terminal_tool import register_live_output_call
+        stream_session_id = str((session or {}).get("session_key") or sid)
+        command = args["command"]
+
+        def _emit_terminal_chunk(chunk: str) -> None:
+            try:
+                from agent.redact import redact_sensitive_text
+                safe = redact_sensitive_text(str(chunk), force=True)
+            except Exception:
+                return
+            if safe:
+                _emit("terminal.output", sid, {"tool_id": tool_call_id, "chunk": safe})
+
+        register_live_output_call(stream_session_id, tool_call_id, command, _emit_terminal_chunk)
     if session is not None:
         with contextlib.suppress(Exception):
             from agent.display import capture_local_edit_snapshot
@@ -328,6 +343,11 @@ def _prepare_tool_result_metadata(sid: str, tool_call_id: str, name: str, args: 
 
 
 def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result: str):
+    if name == "terminal" and isinstance(args, dict) and isinstance(args.get("command"), str):
+        from tools.terminal_tool import unregister_live_output_call
+        session = _sessions.get(sid)
+        stream_session_id = str((session or {}).get("session_key") or sid)
+        unregister_live_output_call(stream_session_id, tool_call_id, args["command"])
     session = _sessions.get(sid)
     prepared = session.setdefault("tool_result_metadata", {}) if session is not None else {}
     # Consume the pre-flush preview even when this completion is dropped as stale.

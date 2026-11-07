@@ -755,11 +755,19 @@ class TerminalOutputPayload(Payload):
     chunk: str
 
 
+class TerminalToolOutputPayload(Payload):
+    """``tools.environments.base_output`` live foreground terminal drain."""
+
+    tool_id: str
+    chunk: str
+
+
 class TerminalClosePayload(Payload):
     process_id: str
 
 
 event("agent.terminal.output", TerminalOutputPayload, doc="Output chunk from an agent-owned background process.")
+event("terminal.output", TerminalToolOutputPayload, doc="Live output chunk from a foreground terminal tool call.")
 event("terminal.close", TerminalClosePayload, doc="An agent-owned background process closed.")
 
 
@@ -880,7 +888,7 @@ __all__ = [
     "SessionReclaimedPayload", "SessionResumeProgressPayload", "SessionTitlePayload", "SessionUsagePayload",
     "SetupReadyPayload", "SideAgentCompletePayload", "SkinPayload", "StatusUpdatePayload",
     "StreamDeltaPayload", "SubagentEventPayload", "SubagentOutputTailEntry", "TerminalClosePayload",
-    "TerminalOutputPayload", "TipShowPayload", "TodoUpdatedPayload", "ToolCompletePayload",
+    "TerminalOutputPayload", "TerminalToolOutputPayload", "TipShowPayload", "TodoUpdatedPayload", "ToolCompletePayload",
     "ToolGeneratingPayload", "ToolLabel", "ToolLabelKind", "ToolOutputRiskPayload", "ToolProgressPayload",
     "ToolStartPayload",
     "TurnStatus", "VoicePartialPayload", "VoiceStatusPayload",

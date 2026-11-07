@@ -73,6 +73,18 @@ def test_nopasswd_probe_runs_sudo_n_inside_backend_only_when_supported(
 
 
 class TestBoundedOutputCollector:
+    def test_live_observer_receives_chunks_and_cannot_break_capture(self):
+        seen = []
+        collector = _BoundedOutputCollector(1_000, on_chunk=seen.append)
+        collector.append("first")
+        collector.append(" second")
+        assert seen == ["first", " second"]
+        assert collector.render() == "first second"
+
+        broken = _BoundedOutputCollector(1_000, on_chunk=lambda _chunk: (_ for _ in ()).throw(RuntimeError("offline")))
+        broken.append("still captured")
+        assert broken.render() == "still captured"
+
     def test_large_stream_retains_bounded_head_and_tail(self):
         collector = _BoundedOutputCollector(1_000)
         collector.append("HEAD-SENTINEL\n")
