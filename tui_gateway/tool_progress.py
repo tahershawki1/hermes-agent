@@ -69,6 +69,38 @@ def _tool_result_text(result: object) -> str:
     return _verbose_text(render, lambda: str(result))
 
 
+class _StreamingRedactor:
+    """Redact terminal output without publishing a token split across reads."""
+
+    _HOLDBACK = 8192
+
+    def __init__(self, emit):
+        self._emit = emit
+        self._pending = ""
+
+    def __call__(self, chunk: str) -> None:
+        self._pending += str(chunk)
+        if len(self._pending) <= self._HOLDBACK:
+            return
+        emit_len = len(self._pending) - self._HOLDBACK
+        safe = self._redact(self._pending[:emit_len])
+        self._pending = self._pending[emit_len:]
+        if safe:
+            self._emit(safe)
+
+    def _redact(self, text: str) -> str:
+        from agent.redact import redact_sensitive_text
+        return redact_sensitive_text(text, force=True)
+
+    def flush(self) -> None:
+        if not self._pending:
+            return
+        safe = self._redact(self._pending)
+        self._pending = ""
+        if safe:
+            self._emit(safe)
+
+
 def _fmt_tool_duration(seconds: float | None) -> str:
     if seconds is None:
         return ""
@@ -290,13 +322,13 @@ def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
 
         def _emit_terminal_chunk(chunk: str) -> None:
             try:
-                from agent.redact import redact_sensitive_text
-                safe = redact_sensitive_text(str(chunk), force=True)
+                redactor(str(chunk))
             except Exception:
                 return
-            if safe:
-                _emit("terminal.output", sid, {"tool_id": tool_call_id, "chunk": safe})
 
+        redactor = _StreamingRedactor(
+            lambda safe: _emit("terminal.output", sid, {"tool_id": tool_call_id, "chunk": safe})
+        )
         register_live_output_call(stream_session_id, tool_call_id, command, _emit_terminal_chunk)
     if session is not None:
         with contextlib.suppress(Exception):
@@ -344,9 +376,10 @@ def _prepare_tool_result_metadata(sid: str, tool_call_id: str, name: str, args: 
 
 def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result: str):
     if name == "terminal" and isinstance(args, dict) and isinstance(args.get("command"), str):
-        from tools.terminal_tool import unregister_live_output_call
+        from tools.terminal_tool import flush_live_output_call, unregister_live_output_call
         session = _sessions.get(sid)
         stream_session_id = str((session or {}).get("session_key") or sid)
+        flush_live_output_call(stream_session_id, tool_call_id, args["command"])
         unregister_live_output_call(stream_session_id, tool_call_id, args["command"])
     session = _sessions.get(sid)
     prepared = session.setdefault("tool_result_metadata", {}) if session is not None else {}

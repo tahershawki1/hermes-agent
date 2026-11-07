@@ -490,6 +490,12 @@ def _start_drain_thread(
         proc: ProcessHandle, output: _BoundedOutputCollector, stop: threading.Event | None = None,
 ) -> threading.Thread:
     """Start the daemon thread running :func:`_drain_stdout`; *stop* ends it early."""
-    thread = threading.Thread(target=_drain_stdout, args=(proc, output, stop), daemon=True)
+    # Drain callbacks can read profile-scoped redaction registries.  A bare
+    # Thread starts with an empty ContextVars context and silently falls back
+    # to the launch profile, so always inherit the caller's profile scope.
+    from agent.memory_provider import spawn_context_thread
+    thread = spawn_context_thread(
+        _drain_stdout, args=(proc, output, stop), name="terminal-output-drain",
+    )
     thread.start()
     return thread

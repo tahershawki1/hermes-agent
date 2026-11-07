@@ -103,6 +103,20 @@ def unregister_live_output_call(session_id: str, tool_call_id: str, command: str
             _live_output_calls.pop(key, None)
 
 
+def flush_live_output_call(session_id: str, tool_call_id: str, command: str) -> None:
+    """Flush a stateful live-output callback before removing its registration."""
+    with _live_output_lock:
+        callbacks = [callback for call_id, callback in _live_output_calls.get((session_id, command), [])
+                     if call_id == tool_call_id]
+    for callback in callbacks:
+        flush = getattr(callback, "flush", None)
+        if flush is not None:
+            try:
+                flush()
+            except Exception:
+                pass
+
+
 def _live_output_callback(session_id: str, command: str):
     with _live_output_lock:
         calls = _live_output_calls.get((session_id, command), [])
