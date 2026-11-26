@@ -539,8 +539,6 @@ def _apply_pairing_event(record, payload: dict) -> None:
     elif event == "error":
         record.status = "error"
         record.error = str(payload.get("error") or "WhatsApp pairing failed.")
-    elif event == "disconnected" and record.status == "starting":
-        record.status = "waiting"
 
 
 def _watch_whatsapp_pairing(pairing_id: str, proc: subprocess.Popen) -> None:

@@ -426,22 +426,13 @@ async function startSocket() {
 
   sock.ev.on('creds.update', () => { saveCreds(); lidToPhone = buildLidMap(); });
 
-  let pairingCodeRequested = false;
-  sock.ev.on('connection.update', async (update) => {
+  sock.ev.on('connection.update', (update) => {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
-      if (PAIR_PHONE && !pairingCodeRequested && !state.creds.registered) {
-        pairingCodeRequested = true;
-        try {
-          const code = await sock.requestPairingCode(PAIR_PHONE);
-          emitPairEvent({ event: 'pairing_code', code });
-        } catch (err) {
-          emitPairEvent({ event: 'error', error: err?.message || 'Could not request a WhatsApp pairing code.' });
-        }
-      } else if (PAIR_JSON && !PAIR_PHONE) {
+      if (PAIR_JSON && !PAIR_PHONE) {
         emitPairEvent({ event: 'qr', qr });
-      } else if (!PAIR_JSON) {
+      } else if (!PAIR_JSON && !PAIR_PHONE) {
         console.log('\n📱 Scan this QR code with WhatsApp on your phone:\n');
         // The QR block is multi-line art; a stamp on its first row would skew it.
         qrcode.generate(qr, { small: true }, (code) => process.stdout.write(`${code}\n`));
@@ -492,6 +483,18 @@ async function startSocket() {
       }
     }
   });
+
+  // Baileys' pairing-code flow is initiated directly after makeWASocket().
+  // Waiting for a QR update first can stall forever because phone pairing
+  // does not depend on receiving a QR payload.
+  if (PAIR_PHONE && !state.creds.registered) {
+    sock.requestPairingCode(PAIR_PHONE).then((code) => {
+      if (code) emitPairEvent({ event: 'pairing_code', code });
+      else emitPairEvent({ event: 'error', error: 'WhatsApp returned an empty pairing code.' });
+    }).catch((err) => {
+      emitPairEvent({ event: 'error', error: err?.message || 'Could not request a WhatsApp pairing code.' });
+    });
+  }
 
   sock.ev.on('message-receipt.update', (receipts) => {
     for (const { key, receipt } of receipts || []) enqueueDeliveryStatus({ key, receipt });
