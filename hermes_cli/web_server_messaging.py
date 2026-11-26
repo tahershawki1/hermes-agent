@@ -192,9 +192,12 @@ class _WhatsAppOnboardingSession:
     session_path: str
     expires_at: str
     expires_at_ts: float
+    pairing_method: str = "qr"
+    phone_number: str | None = None
     profile: str | None = None
     status: str = "starting"
     qr_payload: str | None = None
+    pairing_code: str | None = None
     account_id: str | None = None
     account_name: str | None = None
     account_phone: str | None = None
@@ -213,7 +216,7 @@ def _whatsapp_session_path() -> Path:
 
 
 _WHATSAPP_PAYLOAD_FIELDS = (
-    "status", "qr_payload", "expires_at", "mode", "allowed_users", "account_id", "account_name",
+    "status", "qr_payload", "pairing_code", "expires_at", "mode", "pairing_method", "allowed_users", "account_id", "account_name",
     "account_phone", "error",
 )
 

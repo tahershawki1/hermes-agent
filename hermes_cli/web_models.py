@@ -74,6 +74,8 @@ class TelegramOnboardingApply(BaseModel):
 
 class WhatsAppOnboardingStart(BaseModel):
     mode: Optional[str] = "bot"
+    pairing_method: Optional[str] = "qr"
+    phone_number: Optional[str] = None
     allowed_users: Optional[str] = ""
     profile: Optional[str] = None
     reset_session: bool = False

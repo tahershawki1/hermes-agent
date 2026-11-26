@@ -107,6 +107,20 @@ def test_repair_preserves_credentials_and_starts_fresh_pairing(pairing):
     assert re.fullmatch(r"session-backup-\d{8}T\d{6}Z-.+", backups[0].parent.name)
 
 
+def test_phone_pairing_keeps_number_in_worker_and_exposes_pairing_code(pairing):
+    result = pairing.start(reset_session=True, pairing_method="phone", phone_number="+20 (100) 123-4567")
+    record = messaging._whatsapp_onboarding_sessions[result["pairing_id"]]
+
+    assert result["pairing_method"] == "phone"
+    assert record.phone_number == "201001234567"
+    assert pairing.starts[0][-1] == "201001234567"
+
+    messaging._apply_pairing_event(record, {"event": "pairing_code", "code": "ABCD-1234"})
+    assert record.status == "waiting"
+    assert record.pairing_code == "ABCD-1234"
+    assert web_server_messaging._whatsapp_onboarding_payload(result["pairing_id"], record)["pairing_code"] == "ABCD-1234"
+
+
 def test_reservation_blocks_gateway_until_cancel_before_worker_start(pairing):
     result = pairing.start(reset_session=True)
     assert pairing.gateway_can_acquire() is False

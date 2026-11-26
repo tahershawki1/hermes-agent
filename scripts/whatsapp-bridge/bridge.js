@@ -120,6 +120,7 @@ try {
 } catch {}
 const PAIR_ONLY = args.includes('--pair-only');
 const PAIR_JSON = args.includes('--pair-json');
+const PAIR_PHONE = getArg('pair-phone', '').replace(/\D/g, '');
 const WHATSAPP_MODE = getArg('mode', process.env.WHATSAPP_MODE || 'self-chat'); // "bot" or "self-chat"
 const WHATSAPP_DM_POLICY = String(process.env.WHATSAPP_DM_POLICY || 'open').trim().toLowerCase();
 const WHATSAPP_GROUP_POLICY = String(process.env.WHATSAPP_GROUP_POLICY || 'pairing').trim().toLowerCase();
@@ -425,13 +426,22 @@ async function startSocket() {
 
   sock.ev.on('creds.update', () => { saveCreds(); lidToPhone = buildLidMap(); });
 
-  sock.ev.on('connection.update', (update) => {
+  let pairingCodeRequested = false;
+  sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
-      if (PAIR_JSON) {
+      if (PAIR_PHONE && !pairingCodeRequested && !state.creds.registered) {
+        pairingCodeRequested = true;
+        try {
+          const code = await sock.requestPairingCode(PAIR_PHONE);
+          emitPairEvent({ event: 'pairing_code', code });
+        } catch (err) {
+          emitPairEvent({ event: 'error', error: err?.message || 'Could not request a WhatsApp pairing code.' });
+        }
+      } else if (PAIR_JSON && !PAIR_PHONE) {
         emitPairEvent({ event: 'qr', qr });
-      } else {
+      } else if (!PAIR_JSON) {
         console.log('\n📱 Scan this QR code with WhatsApp on your phone:\n');
         // The QR block is multi-line art; a stamp on its first row would skew it.
         qrcode.generate(qr, { small: true }, (code) => process.stdout.write(`${code}\n`));
@@ -1159,7 +1169,7 @@ app.get('/health', (req, res) => {
 
 // Start
 if (PAIR_ONLY) {
-  // Pair-only mode: just connect, show QR, save creds, exit. No HTTP server.
+  // Pair-only mode: connect, show a QR or request a phone pairing code, save creds, exit.
   if (PAIR_JSON) {
     emitPairEvent({ event: 'started', session: SESSION_DIR });
   } else {

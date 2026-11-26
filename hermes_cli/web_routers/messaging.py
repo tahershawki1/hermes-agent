@@ -449,7 +449,7 @@ def _ensure_whatsapp_bridge_dependencies(bridge_dir: Path) -> None:
         raise HTTPException(status_code=500, detail=f"npm install failed for WhatsApp bridge: {detail or 'no output'}")
 
 
-def _spawn_whatsapp_pairing_process(session_path: Path, mode: str) -> subprocess.Popen:
+def _spawn_whatsapp_pairing_process(session_path: Path, mode: str, phone_number: str | None = None) -> subprocess.Popen:
     from gateway.platforms.whatsapp_common import resolve_whatsapp_bridge_dir
     from hermes_constants import find_node_executable, with_hermes_node_path
 
@@ -476,8 +476,11 @@ def _spawn_whatsapp_pairing_process(session_path: Path, mode: str) -> subprocess
     env["WHATSAPP_MODE"] = mode
     env["WHATSAPP_DM_POLICY"] = "pairing"
     # Owned: a SIGKILLed dashboard must not leave a pairing bridge holding the session dir.
+    command = [node, str(bridge_script), "--pair-only", "--pair-json", "--session", str(session_path)]
+    if phone_number:
+        command.extend(["--pair-phone", phone_number])
     return spawn_owned(
-        [node, str(bridge_script), "--pair-only", "--pair-json", "--session", str(session_path)],
+        command,
         purpose="whatsapp-pairing", cwd=str(bridge_dir), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace", env=env, creationflags=windows_hide_flags(),
     )
@@ -527,6 +530,12 @@ def _apply_pairing_event(record, payload: dict) -> None:
             record.account_phone = _whatsapp_phone_from_identifier(account_id)
         record.status = "connected"
         record.error = None
+    elif event == "pairing_code":
+        code = str(payload.get("code") or "").strip()
+        if code:
+            record.pairing_code = code
+            record.status = "waiting"
+            record.error = None
     elif event == "error":
         record.status = "error"
         record.error = str(payload.get("error") or "WhatsApp pairing failed.")
@@ -562,7 +571,7 @@ def _watch_whatsapp_pairing(pairing_id: str, proc: subprocess.Popen) -> None:
         proc=proc, unless={"connected", "cancelled", "expired"})
 
 
-def _run_whatsapp_pairing(pairing_id: str, session_path: Path, mode: str) -> None:
+def _run_whatsapp_pairing(pairing_id: str, session_path: Path, mode: str, phone_number: str | None = None) -> None:
     with _whatsapp_onboarding_lock:
         record = _whatsapp_onboarding_sessions.get(pairing_id)
         if not record or record.status in _WHATSAPP_ONBOARDING_TERMINAL_STATUSES:
@@ -574,7 +583,8 @@ def _run_whatsapp_pairing(pairing_id: str, session_path: Path, mode: str) -> Non
 
     try:
         try:
-            proc = _spawn_whatsapp_pairing_process(session_path, mode)
+            proc = (_spawn_whatsapp_pairing_process(session_path, mode, phone_number)
+                    if phone_number else _spawn_whatsapp_pairing_process(session_path, mode))
         except Exception as exc:
             _fail_whatsapp_pairing(pairing_id, str(exc))
             return
@@ -680,7 +690,7 @@ def _launch_whatsapp_pairing(pairing_id: str, record: _WhatsAppOnboardingSession
     try:
         record.expiry_timer.start()
         spawn_context_thread(_run_whatsapp_pairing, name="whatsapp-pairing",
-                             args=(pairing_id, session_path, record.mode)).start()
+                             args=(pairing_id, session_path, record.mode, record.phone_number)).start()
         launched = True
     finally:
         if not launched:
@@ -691,6 +701,14 @@ def _launch_whatsapp_pairing(pairing_id: str, record: _WhatsAppOnboardingSession
 @router.post("/api/messaging/whatsapp/onboarding/start")
 async def start_whatsapp_onboarding(body: WhatsAppOnboardingStart, profile: Optional[str] = None):
     mode = _normalize_whatsapp_onboarding_mode(body.mode)
+    pairing_method = str(body.pairing_method or "qr").strip().lower()
+    if pairing_method not in {"qr", "phone"}:
+        raise HTTPException(status_code=422, detail="Choose QR or phone-number pairing.")
+    phone_number = "".join(ch for ch in str(body.phone_number or "") if ch.isdigit())
+    if pairing_method == "phone" and not 8 <= len(phone_number) <= 15:
+        raise HTTPException(status_code=422, detail="Enter a WhatsApp phone number with country code (8–15 digits).")
+    if pairing_method != "phone":
+        phone_number = ""
     allowed_users = _normalize_whatsapp_allowed_users(body.allowed_users)
 
     target_profile = body.profile or profile
@@ -702,6 +720,7 @@ async def start_whatsapp_onboarding(body: WhatsAppOnboardingStart, profile: Opti
         expires_at_ts = time.time() + _WHATSAPP_ONBOARDING_TTL_SECONDS
         fields: dict[str, Any] = dict(
             proc=None, mode=mode, allowed_users=allowed_users, session_path=str(session_path),
+            pairing_method=pairing_method, phone_number=phone_number or None,
             expires_at=datetime.fromtimestamp(expires_at_ts, UTC).isoformat().replace("+00:00", "Z"),
             expires_at_ts=expires_at_ts, profile=target_profile,
         )
